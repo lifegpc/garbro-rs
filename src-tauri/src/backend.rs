@@ -202,7 +202,13 @@ fn detect_file_type(filename: &str, data: &[u8]) -> (EntryType, Option<ScriptTyp
 fn list_fs_directory(path: &Path) -> Result<Vec<Entry>> {
     let mut result = Vec::new();
     for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("无法读取目录项: {}", e);
+                continue;
+            }
+        };
         let metadata = entry.metadata()?;
         let is_dir = metadata.is_dir();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -372,9 +378,13 @@ fn list_archive_directory_in_archive<'a>(
     Ok(result)
 }
 
-fn set_last_directory(app: &AppHandle, dir: &str) -> Result<()> {
-    let path = app.path().app_data_dir()?.join("last_directory.txt");
-    std::fs::write(path, dir)?;
+fn set_last_directory(app: &AppHandle, data: &str) -> Result<()> {
+    let dir = app.path().app_data_dir()?;
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)?;
+    }
+    let path = dir.join("last_directory.txt");
+    std::fs::write(path, data)?;
     Ok(())
 }
 

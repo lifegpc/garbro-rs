@@ -131,14 +131,17 @@ export function ImagePreviewPanel({ path, options }: ImagePreviewPanelProps) {
 
     const rw = cw / w;
     const rh = ch / h;
+    const dpr = window.devicePixelRatio || 1;
+    const scale100 = 1 / dpr;
 
-    if (mode === 'fit') return Math.min(1, rw, rh); // 只缩小不放大
+    if (mode === 'fit') return Math.min(scale100, rw, rh); // 只缩小不放大 (基于物理像素的100%)
     if (mode === 'fill') return Math.max(rw, rh); // 可以放大超过100%
-    if (mode === '100%') return 1;
+    if (mode === '100%') return scale100;
     return cScale;
   };
 
   const currentScale = getScale();
+
 
   const stateRef = useRef({ imageSize, containerSize, scaleMode, customScale, position });
   stateRef.current = { imageSize, containerSize, scaleMode, customScale, position };
@@ -253,7 +256,7 @@ export function ImagePreviewPanel({ path, options }: ImagePreviewPanelProps) {
       {/* Info Status */}
       <div style={infoContainerStyle}>
         <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.7)', fontWeight: 'bold', fontFamily: 'monospace' }}>
-          {Math.round(currentScale * 100)}%
+          {Math.round(currentScale * (window.devicePixelRatio || 1) * 100)}%
           {imageSize && ` | ${imageSize.w} x ${imageSize.h}`}
         </span>
       </div>
