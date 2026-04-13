@@ -3,6 +3,10 @@ import { Spin, Button, Tooltip, Space } from 'antd';
 import { CompressOutlined, BorderOuterOutlined } from '@ant-design/icons';
 import { FileOptions } from '../types';
 import { previewImage } from '../api';
+import pica from 'pica';
+import { useDebounce } from 'use-debounce';
+
+const picaInstance = pica({ features: ['js', 'wasm', 'cib'] });
 
 interface ImagePreviewPanelProps {
   path: string;
@@ -24,6 +28,8 @@ export function ImagePreviewPanel({ path, options }: ImagePreviewPanelProps) {
 
   const prevUrlRef = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   
   const isDragging = useRef(false);
   const dragStart = useRef({ mouseX: 0, mouseY: 0, imgX: 0, imgY: 0 });
@@ -141,7 +147,27 @@ export function ImagePreviewPanel({ path, options }: ImagePreviewPanelProps) {
   };
 
   const currentScale = getScale();
+  const [debouncedScale] = useDebounce(currentScale, 300);
 
+  useEffect(() => {
+    if (!imgRef.current || !canvasRef.current || !imageSize || !objectUrl) return;
+    const cw = Math.max(1, Math.round(imageSize.w * debouncedScale));
+    const ch = Math.max(1, Math.round(imageSize.h * debouncedScale));
+    
+    // To support retina displays, multiply canvas actual dimensions by devicePixelRatio
+    const dpr = window.devicePixelRatio || 1;
+    const canvas = canvasRef.current;
+    if (canvas.width !== cw * dpr || canvas.height !== ch * dpr) {
+      canvas.width = cw * dpr;
+      canvas.height = ch * dpr;
+    }
+
+    picaInstance.resize(imgRef.current, canvas, {
+      unsharpAmount: 60,
+      unsharpRadius: 0.6,
+      unsharpThreshold: 2
+    }).catch(console.warn);
+  }, [debouncedScale, imageSize, objectUrl]);
 
   const stateRef = useRef({ imageSize, containerSize, scaleMode, customScale, position });
   stateRef.current = { imageSize, containerSize, scaleMode, customScale, position };
@@ -207,20 +233,35 @@ export function ImagePreviewPanel({ path, options }: ImagePreviewPanelProps) {
 
   if (!objectUrl) return null;
 
+  const visualScale = currentScale / (debouncedScale || currentScale);
+  const baseW = imageSize ? imageSize.w * debouncedScale : 0;
+  const baseH = imageSize ? imageSize.h * debouncedScale : 0;
+
   return (
     <div style={containerStyle} ref={containerRef}>
+      {/* Hidden original image for pica source */}
       <img
+        ref={imgRef}
         src={objectUrl!}
         alt={path.split('|').pop()?.split(/[/\\]/).pop() ?? ''}
+        style={{ display: 'none' }}
+        onLoad={handleImageLoad}
+      />
+
+      <canvas
+        ref={canvasRef}
         style={{
           ...imgStyle,
-          transform: `translate(calc(-50% + ${position.x}px), calc(-50% + ${position.y}px)) scale(${currentScale})`,
+          width: baseW,
+          height: baseH,
+          transform: `translate(calc(-50% + ${position.x}px), calc(-50% + ${position.y}px)) scale(${visualScale})`,
           cursor: 'grab',
+          imageRendering: 'auto',
+          visibility: baseW > 0 ? 'visible' : 'hidden',
         }}
         draggable={false}
         onClick={(e) => e.stopPropagation()}
         onMouseDown={handleMouseDown}
-        onLoad={handleImageLoad}
       />
 
       {/* Toolbar */}

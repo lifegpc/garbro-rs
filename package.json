@@ -12,14 +12,16 @@
   "dependencies": {
     "@ant-design/icons": "^6.1.1",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-fs": "^2.5.0",
     "@tauri-apps/plugin-opener": "^2",
     "antd": "^6.3.5",
+    "pica": "^9.0.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "use-debounce": "^10.1.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
+    "@types/pica": "^9.0.5",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
