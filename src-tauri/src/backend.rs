@@ -199,6 +199,13 @@ fn detect_file_type(filename: &str, data: &[u8]) -> (EntryType, Option<ScriptTyp
     (EntryType::Unknown, None)
 }
 
+fn try_detect_file_type<P: AsRef<std::path::Path> + ?Sized>(path: &P) -> Result<(EntryType, Option<ScriptType>)> {
+    let mut file = File::open(path)?;
+    let mut buffer = [0; 1024];
+    let n = file.read(&mut buffer)?;
+    Ok(detect_file_type(&path.as_ref().to_string_lossy(), &buffer[..n]))
+}
+
 fn list_fs_directory(path: &Path) -> Result<Vec<Entry>> {
     let mut result = Vec::new();
     for entry in std::fs::read_dir(path)? {
@@ -215,10 +222,13 @@ fn list_fs_directory(path: &Path) -> Result<Vec<Entry>> {
         let (entry_type, msg_tool_type) = if is_dir {
             (EntryType::Folder, None)
         } else {
-            let mut file = std::fs::File::open(entry.path())?;
-            let mut buffer = [0; 1024];
-            let n = file.read(&mut buffer)?;
-            detect_file_type(&name, &buffer[..n])
+            match try_detect_file_type(&entry.path()) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("无法识别文件类型:{} {}", name, e);
+                    (EntryType::Unknown, None)
+                }
+            }
         };
         let size = if is_dir { None } else { Some(metadata.len()) };
         result.push(Entry {
@@ -292,7 +302,7 @@ fn list_archive_directory(path: &Path, option: Option<&Vec<FileOptions>>) -> Res
 
 fn list_archive_directory_in_archive<'a>(
     path: &str,
-    mut reader: Box<dyn ReadSeek + 'a>,
+    mut reader: Box<dyn ReadSeek + Send + Sync + 'a>,
     filename: &str,
     option: Option<&Vec<FileOptions>>,
     typ: Option<ScriptType>,
@@ -462,7 +472,7 @@ pub fn get_xp3_supported_games() -> Vec<GameTitle> {
 }
 
 fn preview_image_in_directory<'a>(
-    mut reader: Box<dyn ReadSeek + 'a>,
+    mut reader: Box<dyn ReadSeek + Send + Sync + 'a>,
     filename: &str,
     options: Option<&Vec<FileOptions>>,
     script_type: Option<ScriptType>,
@@ -518,7 +528,7 @@ fn preview_image_in_directory<'a>(
 
 fn preview_image_in_archive<'a>(
     path: &str,
-    mut reader: Box<dyn ReadSeek + 'a>,
+    mut reader: Box<dyn ReadSeek + Send + Sync + 'a>,
     filename: &str,
     option: Option<&Vec<FileOptions>>,
     typ: Option<ScriptType>,
