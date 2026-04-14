@@ -3,7 +3,7 @@ use msg_tool::ext::io::MutexWrapper;
 use msg_tool::ext::mutex::*;
 use msg_tool::scripts::base::ReadSeek;
 use msg_tool::scripts::{BUILDER, Script, ScriptBuilder};
-use msg_tool::types::{ExtraConfig, ImageOutputType, ScriptType};
+use msg_tool::types::{ExtraConfig, ImageOutputType, PngCompressionLevel, ScriptType};
 use msg_tool::utils::img::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -12,6 +12,7 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
+use tauri::ipc::Response;
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
@@ -612,7 +613,8 @@ fn preview_image_in_directory<'a>(
             .as_ref()
             .and_then(|opts| opts.get(index).cloned())
             .unwrap_or_default();
-        let extra_config = option.to_extra_config();
+        let mut extra_config = option.to_extra_config();
+        extra_config.png_compression_level = PngCompressionLevel::Fast;
         let encoding = builder.default_encoding();
         let archive_encoding = builder.default_archive_encoding().unwrap_or(encoding);
         let image = builder.build_script_from_reader(
@@ -701,7 +703,7 @@ fn preview_image_in_archive<'a>(
 /// path: /path/to/archive.zip|image.png 预览archive.zip内的image.png，options[0] 会用于打开archive.zip， options[1] 会用于打开image.png（如果需要的话）
 /// path: /path/to/archive.zip|inner/archive2.zip|image.png 预览archive2.zip内的image.png，options[0] 会用于打开archive.zip， options[1] 会用于打开archive2.zip， options[2] 会用于打开image.png（如果需要的话）
 #[tauri::command]
-pub fn preview_image(path: &str, options: Option<Vec<FileOptions>>) -> Result<Vec<u8>, ErrorMsg> {
+pub fn preview_image(path: &str, options: Option<Vec<FileOptions>>) -> Result<Response, ErrorMsg> {
     if path.contains("|") {
         return CACHE_MANAGER
             .lock_blocking()
@@ -709,6 +711,8 @@ pub fn preview_image(path: &str, options: Option<Vec<FileOptions>>) -> Result<Ve
             .map_err(|e| ErrorMsg {
                 typ: ErrorType::Other,
                 msg: e.to_string(),
+            }).map(|data| {
+                Response::new(data)
             });
     }
     let path = std::path::Path::new(path);
@@ -739,5 +743,7 @@ pub fn preview_image(path: &str, options: Option<Vec<FileOptions>>) -> Result<Ve
     .map_err(|e| ErrorMsg {
         typ: ErrorType::Other,
         msg: format!("预览图片失败: {}", e),
+    }).map(|data| {
+        Response::new(data)
     })
 }

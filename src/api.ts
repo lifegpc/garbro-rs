@@ -14,6 +14,5 @@ export async function listDirectory(path: string, options?: FileOptions[]): Prom
 }
 
 export async function previewImage(path: string, options?: FileOptions[]): Promise<Uint8Array> {
-  const bytes: number[] = await invoke("preview_image", { path, options: options ?? null });
-  return new Uint8Array(bytes);
+  return await invoke("preview_image", { path, options: options ?? null });
 }
