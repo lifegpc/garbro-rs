@@ -1,14 +1,16 @@
 use anyhow::Result;
+use msg_tool::ext::io::MutexWrapper;
+use msg_tool::ext::mutex::*;
 use msg_tool::scripts::base::ReadSeek;
-use msg_tool::scripts::{BUILDER, ScriptBuilder};
+use msg_tool::scripts::{BUILDER, Script, ScriptBuilder};
 use msg_tool::types::{ExtraConfig, ImageOutputType, ScriptType};
 use msg_tool::utils::img::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -16,6 +18,175 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 lazy_static::lazy_static! {
     static ref ENTRY_TYPE_CACHE: Mutex<BTreeMap<ScriptType, EntryType>> = Mutex::new(BTreeMap::new());
 }
+
+struct CacheEntry<'a> {
+    archive: Box<dyn Script + Send + Sync + 'a>,
+    path: String,
+    option: FileOptions,
+}
+
+impl<'a> CacheEntry<'a> {
+    fn new(
+        mut reader: Box<dyn ReadSeek + Send + Sync + 'a>,
+        filename: &str,
+        option: FileOptions,
+        script_type: Option<ScriptType>,
+    ) -> Result<Self> {
+        let (entry_type, msg_tool_type) = if let Some(typ) = script_type {
+            let entry_type = if typ.is_audio() {
+                EntryType::Audio
+            } else {
+                query_entry_type(&typ)
+            };
+            (entry_type, Some(typ.clone()))
+        } else {
+            let mut buffer = [0; 1024];
+            let n = reader.read(&mut buffer)?;
+            reader.rewind()?;
+            detect_file_type(filename, &buffer[..n])
+        };
+        if entry_type != EntryType::Archive {
+            return Err(anyhow::anyhow!("不是归档文件"));
+        }
+        let script_type = msg_tool_type.ok_or_else(|| anyhow::anyhow!("无法识别的归档格式"))?;
+        let builder = BUILDER
+            .iter()
+            .find(|b| b.script_type() == &script_type)
+            .ok_or_else(|| anyhow::anyhow!("不支持的归档格式"))?;
+        let extra_config = option.to_extra_config();
+        let encoding = builder.default_encoding();
+        let archive_encoding = builder.default_archive_encoding().unwrap_or(encoding);
+        let archive = builder.build_script_from_reader(
+            reader,
+            filename,
+            encoding,
+            archive_encoding,
+            &extra_config,
+            None,
+        )?;
+        Ok(CacheEntry {
+            archive,
+            path: filename.to_string(),
+            option,
+        })
+    }
+}
+
+struct CacheManager {
+    file: Option<Arc<Mutex<BufReader<File>>>>,
+    cache: Option<CacheEntry<'static>>,
+}
+
+impl CacheManager {
+    fn list_archive(
+        &mut self,
+        path: &str,
+        option: Option<&Vec<FileOptions>>,
+    ) -> Result<Vec<Entry>> {
+        let paths = path.split("|").collect::<Vec<_>>();
+        let cache = self.get_entry(path, option)?;
+        if paths.len() == 1 {
+            let mut result = Vec::new();
+            let mut index = 0;
+            for entry in cache.archive.iter_archive_filename()? {
+                let name = entry?;
+                let mut entry = cache.archive.open_file(index)?;
+                index += 1;
+                let (entry_type, msg_tool_type) = if let Some(typ) = entry.script_type() {
+                    let entry_type = if typ.is_audio() {
+                        EntryType::Audio
+                    } else {
+                        query_entry_type(&typ)
+                    };
+                    (entry_type, Some(typ.clone()))
+                } else {
+                    let mut buffer = [0; 1024];
+                    let n = entry.read(&mut buffer)?;
+                    detect_file_type(&name, &buffer[..n])
+                };
+                // 扁平结构，不区分文件夹，前端根据路径解析出文件夹结构
+                result.push(Entry {
+                    name,
+                    is_dir: false,
+                    entry_type,
+                    msg_tool_type,
+                    size: None,
+                });
+            }
+            Ok(result)
+        } else {
+            let filename = path.split("|").nth(1).unwrap();
+            let mut entry = cache.archive.open_file_by_name(filename, false)?;
+            let typ = entry.script_type().map(|t| t.clone());
+            let entry = entry.to_data()?;
+            let path = path.splitn(2, "|").nth(1).unwrap();
+            list_archive_directory_in_archive(path, entry, filename, option, typ, 1)
+        }
+    }
+
+    fn preview_image(&mut self, path: &str, option: Option<&Vec<FileOptions>>) -> Result<Vec<u8>> {
+        let cache = self.get_entry(path, option)?;
+        let paths = path.split("|").collect::<Vec<_>>();
+        if paths.len() == 2 {
+            let filename = paths[1];
+            let mut entry = cache.archive.open_file_by_name(filename, false)?;
+            let typ = entry.script_type().map(|t| t.clone());
+            let entry = entry.to_data()?;
+            preview_image_in_directory(entry, filename, option, typ, 1)
+        } else {
+            let filename = paths[1];
+            let mut entry = cache.archive.open_file_by_name(filename, false)?;
+            let typ = entry.script_type().map(|t| t.clone());
+            let entry = entry.to_data()?;
+            let path = path.splitn(2, "|").nth(1).unwrap();
+            preview_image_in_archive(path, entry, filename, option, typ, 1)
+        }
+    }
+
+    // 目前只能缓存根归档文件
+    fn get_entry(
+        &mut self,
+        path: &str,
+        option: Option<&Vec<FileOptions>>,
+    ) -> Result<&CacheEntry<'static>> {
+        let paths = path.split("|").collect::<Vec<_>>();
+        let is_hit = self.cache.as_ref().map_or(false, |cache| {
+            if paths[0] == cache.path {
+                let opt = option
+                    .and_then(|opts| opts.get(0).cloned())
+                    .unwrap_or_default();
+                if opt == cache.option {
+                    return true;
+                }
+            }
+            false
+        });
+        let entry = if is_hit {
+            self.cache.as_ref().unwrap()
+        } else {
+            // 关闭当前缓存的文件和归档
+            self.cache.take();
+            self.file.take();
+            let file = Arc::new(Mutex::new(BufReader::new(File::open(paths[0])?)));
+            let option = option
+                .and_then(|opts| opts.get(0).cloned())
+                .unwrap_or_default();
+            let mfile = MutexWrapper::new(file.clone(), 0);
+            let cache_entry = CacheEntry::new(Box::new(mfile), paths[0], option, None)?;
+            self.file = Some(file.clone());
+            self.cache = Some(cache_entry);
+            self.cache.as_ref().unwrap()
+        };
+        Ok(entry)
+    }
+}
+
+lazy_static::lazy_static!(
+    static ref CACHE_MANAGER: Mutex<CacheManager> = Mutex::new(CacheManager {
+        file: None,
+        cache: None,
+    });
+);
 
 fn query_entry_type(script_type: &ScriptType) -> EntryType {
     let mut cache = ENTRY_TYPE_CACHE.lock().unwrap();
@@ -90,7 +261,7 @@ pub struct GameTitle {
     alias: Option<Vec<String>>,
 }
 
-#[derive(Debug, Default, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone, PartialEq, Eq)]
 pub struct Xp3Option {
     /// 设置游戏标题，用于解密xp3文件
     game_title: Option<String>,
@@ -98,7 +269,7 @@ pub struct Xp3Option {
     force_decrypt: bool,
 }
 
-#[derive(Debug, Default, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone, PartialEq, Eq)]
 pub struct FileOptions {
     xp3: Option<Xp3Option>,
 }
@@ -199,11 +370,16 @@ fn detect_file_type(filename: &str, data: &[u8]) -> (EntryType, Option<ScriptTyp
     (EntryType::Unknown, None)
 }
 
-fn try_detect_file_type<P: AsRef<std::path::Path> + ?Sized>(path: &P) -> Result<(EntryType, Option<ScriptType>)> {
+fn try_detect_file_type<P: AsRef<std::path::Path> + ?Sized>(
+    path: &P,
+) -> Result<(EntryType, Option<ScriptType>)> {
     let mut file = File::open(path)?;
     let mut buffer = [0; 1024];
     let n = file.read(&mut buffer)?;
-    Ok(detect_file_type(&path.as_ref().to_string_lossy(), &buffer[..n]))
+    Ok(detect_file_type(
+        &path.as_ref().to_string_lossy(),
+        &buffer[..n],
+    ))
 }
 
 fn list_fs_directory(path: &Path) -> Result<Vec<Entry>> {
@@ -237,64 +413,6 @@ fn list_fs_directory(path: &Path) -> Result<Vec<Entry>> {
             entry_type,
             msg_tool_type,
             size,
-        });
-    }
-    Ok(result)
-}
-
-fn list_archive_directory(path: &Path, option: Option<&Vec<FileOptions>>) -> Result<Vec<Entry>> {
-    let option = option
-        .and_then(|opts| opts.get(0).cloned())
-        .unwrap_or_default();
-    let mut header = [0; 1024];
-    let n = {
-        let mut file = File::open(path)?;
-        file.read(&mut header)?
-    };
-    let (entry_type, msg_tool_type) = detect_file_type(&path.to_string_lossy(), &header[..n]);
-    if entry_type != EntryType::Archive {
-        return Err(anyhow::anyhow!("不是归档文件"));
-    }
-    let script_type = msg_tool_type.ok_or_else(|| anyhow::anyhow!("无法识别的归档格式"))?;
-    let builder = BUILDER
-        .iter()
-        .find(|b| b.script_type() == &script_type)
-        .ok_or_else(|| anyhow::anyhow!("不支持的归档格式"))?;
-    let extra_config = option.to_extra_config();
-    let encoding = builder.default_encoding();
-    let archive_encoding = builder.default_archive_encoding().unwrap_or(encoding);
-    let archive = builder.build_script_from_file(
-        &path.to_string_lossy(),
-        encoding,
-        archive_encoding,
-        &extra_config,
-        None,
-    )?;
-    let mut result = Vec::new();
-    let mut index = 0;
-    for entry in archive.iter_archive_filename()? {
-        let name = entry?;
-        let mut entry = archive.open_file(index)?;
-        index += 1;
-        let (entry_type, msg_tool_type) = if let Some(typ) = entry.script_type() {
-            let entry_type = if typ.is_audio() {
-                EntryType::Audio
-            } else {
-                query_entry_type(&typ)
-            };
-            (entry_type, Some(typ.clone()))
-        } else {
-            let mut buffer = [0; 1024];
-            let n = entry.read(&mut buffer)?;
-            detect_file_type(&name, &buffer[..n])
-        };
-        // 扁平结构，不区分文件夹，前端根据路径解析出文件夹结构
-        result.push(Entry {
-            name,
-            is_dir: false,
-            entry_type,
-            msg_tool_type,
-            size: None,
         });
     }
     Ok(result)
@@ -415,25 +533,13 @@ pub fn list_directory(
     options: Option<Vec<FileOptions>>,
 ) -> Result<Vec<Entry>, ErrorMsg> {
     if path.contains("|") {
-        let filename = path.split("|").nth(0).unwrap();
-        let reader = Box::new(std::io::BufReader::new(File::open(filename).map_err(
-            |e| ErrorMsg {
-                typ: ErrorType::NotFound,
-                msg: format!("无法打开文件: {}", e),
-            },
-        )?));
-        return list_archive_directory_in_archive(
-            path,
-            reader,
-            filename,
-            options.as_ref(),
-            None,
-            0,
-        )
-        .map_err(|e| ErrorMsg {
-            typ: ErrorType::Other,
-            msg: e.to_string(),
-        });
+        return CACHE_MANAGER
+            .lock_blocking()
+            .list_archive(path, options.as_ref())
+            .map_err(|e| ErrorMsg {
+                typ: ErrorType::Other,
+                msg: e.to_string(),
+            });
     }
     let path = std::path::Path::new(path);
     if !path.exists() {
@@ -446,10 +552,13 @@ pub fn list_directory(
         if let Some(parent) = path.parent() {
             let _ = set_last_directory(&app, parent.to_string_lossy().as_ref());
         }
-        return list_archive_directory(path, options.as_ref()).map_err(|e| ErrorMsg {
-            typ: ErrorType::Other,
-            msg: e.to_string(),
-        });
+        return CACHE_MANAGER
+            .lock_blocking()
+            .list_archive(&path.to_string_lossy(), options.as_ref())
+            .map_err(|e| ErrorMsg {
+                typ: ErrorType::Other,
+                msg: e.to_string(),
+            });
     }
     let _ = set_last_directory(&app, path.to_string_lossy().as_ref());
     list_fs_directory(path).map_err(|e| ErrorMsg {
@@ -550,9 +659,6 @@ fn preview_image_in_archive<'a>(
         reader.rewind()?;
         detect_file_type("", &buffer[..n])
     };
-    if entry_type != EntryType::Archive {
-        return Err(anyhow::anyhow!("不是归档文件"));
-    }
     let msg_tool_type = msg_tool_type.ok_or_else(|| anyhow::anyhow!("无法识别的归档格式"))?;
     let builder = BUILDER
         .iter()
@@ -570,6 +676,9 @@ fn preview_image_in_archive<'a>(
         None,
     )?;
     if path.contains("|") {
+        if !archive.is_archive() {
+            return Err(anyhow::anyhow!("不是归档文件"));
+        }
         let filename = path.split("|").nth(0).unwrap();
         let mut entry = archive.open_file_by_name(filename, false)?;
         let typ = entry.script_type().map(|t| t.clone());
@@ -594,18 +703,12 @@ fn preview_image_in_archive<'a>(
 #[tauri::command]
 pub fn preview_image(path: &str, options: Option<Vec<FileOptions>>) -> Result<Vec<u8>, ErrorMsg> {
     if path.contains("|") {
-        let filename = path.split("|").nth(0).unwrap();
-        let reader = Box::new(std::io::BufReader::new(File::open(filename).map_err(
-            |e| ErrorMsg {
-                typ: ErrorType::NotFound,
-                msg: format!("无法打开文件: {}", e),
-            },
-        )?));
-        let path = path.splitn(2, "|").nth(1).unwrap();
-        return preview_image_in_archive(path, reader, filename, options.as_ref(), None, 0)
+        return CACHE_MANAGER
+            .lock_blocking()
+            .preview_image(path, options.as_ref())
             .map_err(|e| ErrorMsg {
                 typ: ErrorType::Other,
-                msg: format!("预览图片失败: {}", e),
+                msg: e.to_string(),
             });
     }
     let path = std::path::Path::new(path);
