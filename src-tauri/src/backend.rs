@@ -34,12 +34,7 @@ impl<'a> CacheEntry<'a> {
         script_type: Option<ScriptType>,
     ) -> Result<Self> {
         let (entry_type, msg_tool_type) = if let Some(typ) = script_type {
-            let entry_type = if typ.is_audio() {
-                EntryType::Audio
-            } else {
-                query_entry_type(&typ)
-            };
-            (entry_type, Some(typ.clone()))
+            (query_entry_type(&typ), Some(typ.clone()))
         } else {
             let mut buffer = [0; 1024];
             let n = reader.read(&mut buffer)?;
@@ -94,12 +89,7 @@ impl CacheManager {
                 let mut entry = cache.archive.open_file(index)?;
                 index += 1;
                 let (entry_type, msg_tool_type) = if let Some(typ) = entry.script_type() {
-                    let entry_type = if typ.is_audio() {
-                        EntryType::Audio
-                    } else {
-                        query_entry_type(&typ)
-                    };
-                    (entry_type, Some(typ.clone()))
+                    (query_entry_type(&typ), Some(typ.clone()))
                 } else {
                     let mut buffer = [0; 1024];
                     let n = entry.read(&mut buffer)?;
@@ -194,7 +184,7 @@ fn query_entry_type(script_type: &ScriptType) -> EntryType {
     if let Some(entry_type) = cache.get(script_type) {
         return entry_type.clone();
     }
-    let entry_type = if script_type.is_audio() {
+    let entry_type = if matches!(script_type, ScriptType::BGIAudio | ScriptType::CircusPcm) {
         EntryType::Audio
     } else {
         let builder = BUILDER
@@ -207,17 +197,6 @@ fn query_entry_type(script_type: &ScriptType) -> EntryType {
     entry_type
 }
 
-/// 到时候可能考虑把识别写到msg_tool那里
-trait ScriptTypeExt {
-    fn is_audio(&self) -> bool;
-}
-
-impl ScriptTypeExt for ScriptType {
-    fn is_audio(&self) -> bool {
-        matches!(self, ScriptType::BGIAudio | ScriptType::CircusPcm)
-    }
-}
-
 trait ScriptBuilderExt {
     fn entry_type(&self) -> EntryType;
 }
@@ -228,7 +207,7 @@ impl<T: ScriptBuilder + ?Sized> ScriptBuilderExt for T {
             EntryType::Image
         } else if self.is_archive() {
             EntryType::Archive
-        } else if self.script_type().is_audio() {
+        } else if self.is_audio() {
             EntryType::Audio
         } else {
             EntryType::Unknown
@@ -431,12 +410,7 @@ fn list_archive_directory_in_archive<'a>(
         .and_then(|opts| opts.get(index).cloned())
         .unwrap_or_default();
     let (entry_type, msg_tool_type) = if let Some(typ) = typ {
-        let entry_type = if typ.is_audio() {
-            EntryType::Audio
-        } else {
-            query_entry_type(&typ)
-        };
-        (entry_type, Some(typ.clone()))
+        (query_entry_type(&typ), Some(typ.clone()))
     } else {
         let mut buffer = [0; 1024];
         let n = reader.read(&mut buffer)?;
@@ -484,12 +458,7 @@ fn list_archive_directory_in_archive<'a>(
         let mut entry = archive.open_file(index)?;
         index += 1;
         let (entry_type, msg_tool_type) = if let Some(typ) = entry.script_type() {
-            let entry_type = if typ.is_audio() {
-                EntryType::Audio
-            } else {
-                query_entry_type(&typ)
-            };
-            (entry_type, Some(typ.clone()))
+            (query_entry_type(&typ), Some(typ.clone()))
         } else {
             let mut buffer = [0; 1024];
             let n = entry.read(&mut buffer)?;
@@ -589,12 +558,7 @@ fn preview_image_in_directory<'a>(
     index: usize,
 ) -> Result<Vec<u8>> {
     let (entry_type, msg_tool_type) = if let Some(typ) = script_type {
-        let entry_type = if typ.is_audio() {
-            EntryType::Audio
-        } else {
-            query_entry_type(&typ)
-        };
-        (entry_type, Some(typ.clone()))
+        (query_entry_type(&typ), Some(typ.clone()))
     } else {
         let mut buffer = [0; 1024];
         let n = reader.read(&mut buffer)?;
@@ -649,12 +613,7 @@ fn preview_image_in_archive<'a>(
         .and_then(|opts| opts.get(index).cloned())
         .unwrap_or_default();
     let (entry_type, msg_tool_type) = if let Some(typ) = typ {
-        let entry_type = if typ.is_audio() {
-            EntryType::Audio
-        } else {
-            query_entry_type(&typ)
-        };
-        (entry_type, Some(typ.clone()))
+        (query_entry_type(&typ), Some(typ.clone()))
     } else {
         let mut buffer = [0; 1024];
         let n = reader.read(&mut buffer)?;
