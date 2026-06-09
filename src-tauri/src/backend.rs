@@ -87,6 +87,7 @@ impl CacheManager {
             for entry in cache.archive.iter_archive_filename()? {
                 let name = entry?;
                 let mut entry = cache.archive.open_file(index)?;
+                let file_size = entry.size();
                 index += 1;
                 let (entry_type, msg_tool_type) = if let Some(typ) = entry.script_type() {
                     (query_entry_type(&typ), Some(typ.clone()))
@@ -101,7 +102,7 @@ impl CacheManager {
                     is_dir: false,
                     entry_type,
                     msg_tool_type,
-                    size: None,
+                    size: file_size,
                 });
             }
             Ok(result)
@@ -456,6 +457,7 @@ fn list_archive_directory_in_archive<'a>(
     for entry in archive.iter_archive_filename()? {
         let name = entry?;
         let mut entry = archive.open_file(index)?;
+        let file_size = entry.size();
         index += 1;
         let (entry_type, msg_tool_type) = if let Some(typ) = entry.script_type() {
             (query_entry_type(&typ), Some(typ.clone()))
@@ -470,7 +472,7 @@ fn list_archive_directory_in_archive<'a>(
             is_dir: false,
             entry_type,
             msg_tool_type,
-            size: None,
+            size: file_size,
         });
     }
     Ok(result)
